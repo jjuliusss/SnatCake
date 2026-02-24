@@ -21,7 +21,7 @@ const backgroundStyles = `
 
 const FloatingBackground = () => (
   <>
-    <style>{backgroundStyles}</style>
+    <style dangerouslySetInnerHTML={{ __html: backgroundStyles }} />
     <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
       <div className="floating-icon text-4xl" style={{ top: '10%', left: '10%', animationDelay: '0s' }}>🐍</div>
       <div className="floating-icon text-5xl" style={{ top: '20%', right: '15%', animationDelay: '1s' }}>💖</div>
@@ -37,29 +37,19 @@ const FloatingBackground = () => (
 
 // --- FIREBASE INITIALIZATION ---
 const USER_CONFIG = {
-  apiKey: "AIzaSyDjW_vAnECSuiMz2UHoe01XYOKZaXXXRts",
-  authDomain: "nemoth.firebaseapp.com",
-  projectId: "nemoth",
-  storageBucket: "nemoth.firebasestorage.app",
-  messagingSenderId: "285654880117",
-  appId: "1:285654880117:web:70d79d1fce27d1ffeccd3c"
+  apiKey: "",
+  authDomain: "",
+  projectId: "",
+  storageBucket: "",
+  messagingSenderId: "",
+  appId: ""
 };
 
-const isCustomConfigValid = USER_CONFIG.apiKey && USER_CONFIG.apiKey !== "YOUR_API_KEY";
-const firebaseConfig = isCustomConfigValid
-  ? USER_CONFIG
-  : (typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {});
-
+const isCustomConfigValid = true; // We assume valid config will be loaded from worker
 const canvasAppId = typeof __app_id !== 'undefined' ? __app_id : 'secure-chat';
 
 let app, auth, db;
-try {
-  app = initializeApp(firebaseConfig);
-  auth = getAuth(app);
-  db = getFirestore(app);
-} catch (error) {
-  console.error("Lỗi khởi tạo Firebase: Vui lòng điền đúng firebaseConfig.");
-}
+// Initialization is deferred until config is fetched
 
 const encodeData = (str) => btoa(encodeURIComponent(str));
 const decodeData = (str) => {
@@ -123,6 +113,7 @@ const playAlarmSound = () => {
 };
 
 export default function App() {
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [isLocked, setIsLocked] = useState(true);
@@ -145,6 +136,7 @@ export default function App() {
   const [previewImage, setPreviewImage] = useState(null);
 
   const [visibleDaysCount, setVisibleDaysCount] = useState(1);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const chatContainerRef = useRef(null);
   const scrollDataRef = useRef({ oldHeight: 0, isLoadingMore: false });
 
@@ -155,6 +147,41 @@ export default function App() {
   const bgInputRef = useRef(null);
 
   useEffect(() => {
+    const link = document.querySelector("link[rel*='icon']") || document.createElement('link');
+    link.type = 'image/svg+xml';
+    link.rel = 'shortcut icon';
+    link.href = `data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>😶‍🌫️</text></svg>`;
+    document.getElementsByTagName('head')[0].appendChild(link);
+  }, []);
+
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        // TODO: Replace with your actual Cloudflare Worker URL
+        const response = await fetch('https://snatcake.tronghieu1042.workers.dev');
+        if (!response.ok) throw new Error('Failed to fetch config');
+        const config = await response.json();
+        
+        if (!config || !config.projectId) {
+          throw new Error('Cấu hình Firebase không hợp lệ (thiếu projectId). Hãy kiểm tra biến môi trường trong Cloudflare Worker.');
+        }
+
+        app = initializeApp(config);
+        auth = getAuth(app);
+        db = getFirestore(app);
+        setConfigLoaded(true);
+      } catch (err) {
+        console.error(err);
+        setErrorMsg("Không thể tải cấu hình bảo mật từ Cloudflare Worker.");
+        setLoading(false);
+      }
+    };
+    fetchConfig();
+  }, []);
+
+  useEffect(() => {
+    if (!configLoaded) return;
+
     if (!auth) {
       setLoading(false);
       setErrorMsg("Chưa cấu hình Firebase Web SDK hợp lệ.");
@@ -162,11 +189,7 @@ export default function App() {
     }
     const initAuth = async () => {
       try {
-        if (!isCustomConfigValid && typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
+        await signInAnonymously(auth);
       } catch (err) {
         setLoading(false);
       }
@@ -177,7 +200,7 @@ export default function App() {
       if (currentUser) setLoading(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [configLoaded]);
 
   const lockApp = () => {
     setIsLocked(true);
@@ -217,6 +240,7 @@ export default function App() {
 
   useEffect(() => {
     setVisibleDaysCount(1);
+    setIsLoadingHistory(false);
     scrollDataRef.current = { oldHeight: 0, isLoadingMore: false };
   }, [currentRoom?.id]);
 
@@ -280,20 +304,32 @@ export default function App() {
   });
 
   const handleChatScroll = (e) => {
-    if (e.target.scrollTop === 0 && visibleDaysCount < uniqueDays.length) {
+    // Thêm cờ bảo vệ isLoadingMore để tránh bị dội event (trigger nhiều lần)
+    if (e.target.scrollTop === 0 && visibleDaysCount < uniqueDays.length && !scrollDataRef.current.isLoadingMore) {
       scrollDataRef.current = { oldHeight: e.target.scrollHeight, isLoadingMore: true };
-      setVisibleDaysCount(prev => prev + 1);
+      setIsLoadingHistory(true);
+      
+      // Tạo độ trễ nhẹ để hiển thị UI tải và gom request
+      setTimeout(() => {
+        setVisibleDaysCount(prev => prev + 1);
+      }, 500);
     }
   };
 
   useEffect(() => {
     if (!chatContainerRef.current) return;
-    if (scrollDataRef.current.isLoadingMore) {
-      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight - scrollDataRef.current.oldHeight;
-      scrollDataRef.current.isLoadingMore = false;
-    } else {
-      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
-    }
+    
+    // Dùng requestAnimationFrame để chắc chắn DOM đã cập nhật xong layout
+    requestAnimationFrame(() => {
+      if (!chatContainerRef.current) return;
+      if (scrollDataRef.current.isLoadingMore) {
+        chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight - scrollDataRef.current.oldHeight;
+        scrollDataRef.current.isLoadingMore = false;
+        setIsLoadingHistory(false);
+      } else {
+        chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+      }
+    });
   }, [displayedMessages.length]);
 
   const showNotification = (msg) => { setNotification(msg); setTimeout(() => setNotification(''), 3000); };
@@ -304,18 +340,18 @@ export default function App() {
     try {
       const roomRef = await addDoc(getRoomsCollection(), { name: name.trim(), allowedUsers: users.map(encodeData), createdAt: Date.now(), createdBy: encodeData(profile.username) });
       await logActivity('CREATE_ROOM', profile.username, { roomName: encodeData(name.trim()), roomId: roomRef.id });
-      await addDoc(getMessagesCollection(), { roomId: roomRef.id, senderId: 'system', senderName: encodeData('Hệ thống'), text: `Tổ chat "${name.trim()}" được tạo bởi ${profile.username}.`, isSystem: true, timestamp: Date.now() });
-      showNotification("Đã tạo Tổ chat mới!");
-    } catch(err) { showNotification("Lỗi khi tạo Tổ."); }
+      await addDoc(getMessagesCollection(), { roomId: roomRef.id, senderId: 'system', senderName: encodeData('Hệ thống'), text: `Tổ chat "${name.trim()}" được tạo bởi ${profile.username}.`, isSystem: true, timestamp: Date.now() });
+      showNotification("Đã tạo Tổ chat mới!");
+    } catch(err) { showNotification("Lỗi khi tạo Tổ."); }
   };
 
   const handleAddMember = async (newMember) => {
     if (!currentRoom || !newMember) return;
     try {
       await updateDoc(doc(getRoomsCollection(), currentRoom.id), { allowedUsers: arrayUnion(encodeData(newMember)) });
-      await addDoc(getMessagesCollection(), { roomId: currentRoom.id, senderId: 'system', senderName: encodeData('Hệ thống'), text: `${profile.username} đã thêm thành viên "${newMember}" vào Tổ chat.`, isSystem: true, timestamp: Date.now() });
+      await addDoc(getMessagesCollection(), { roomId: currentRoom.id, senderId: 'system', senderName: encodeData('Hệ thống'), text: `${profile.username} đã thêm thành viên "${newMember}" vào Tổ chat.`, isSystem: true, timestamp: Date.now() });
       await logActivity('ADD_MEMBER', profile.username, { roomId: currentRoom.id, addedUser: encodeData(newMember) });
-      showNotification(`Đã thêm ${newMember} vào Tổ!`);
+      showNotification(`Đã thêm ${newMember} vào Tổ!`);
     } catch (err) { showNotification("Lỗi khi thêm thành viên."); }
   };
 
@@ -450,6 +486,7 @@ export default function App() {
   };
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-pink-50 text-pink-500"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-pink-500"></div></div>;
+  if (errorMsg) return <div className="min-h-screen flex items-center justify-center bg-pink-50 p-4"><div className="bg-white p-6 rounded-2xl shadow-xl border-2 border-red-200 text-center"><div className="text-red-500 font-bold text-lg mb-2">Lỗi Kết Nối</div><p className="text-gray-600">{errorMsg}</p></div></div>;
   if (!user) return <div className="min-h-screen flex items-center justify-center bg-pink-50"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-pink-400"></div></div>;
   if (!profile) return <AuthScreen db={db} onComplete={(p) => setProfile(p)} />;
   if (isLocked) return <LockScreen profile={profile} onUnlock={() => setIsLocked(false)} onReset={() => setProfile(null)} />;
@@ -498,7 +535,7 @@ export default function App() {
               <input type="file" accept="image/*" className="hidden" ref={bgInputRef} onChange={handleBgUpload} />
             </>
           )}
-          <button onClick={lockApp} className="p-2 hover:bg-pink-50 rounded-full transition-colors text-gray-500 hover:text-pink-500 border border-transparent hover:border-pink-200" title="Khóa Tổ">
+          <button onClick={lockApp} className="p-2 hover:bg-pink-50 rounded-full transition-colors text-gray-500 hover:text-pink-500 border border-transparent hover:border-pink-200" title="Khóa Tổ">
             <Lock className="w-5 h-5" />
           </button>
           {!currentRoom && (
@@ -522,7 +559,7 @@ export default function App() {
               </div>
             ) : (
               <>
-                {visibleDaysCount < uniqueDays.length && <div className="text-center text-[10px] font-bold text-pink-400 py-2 animate-pulse uppercase tracking-widest">Đang tải thêm lịch sử...</div>}
+                {isLoadingHistory && <div className="text-center text-[10px] font-bold text-pink-400 py-2 animate-pulse uppercase tracking-widest">Đang tải thêm lịch sử...</div>}
                 {groupedMessages.map((item) => item.type === 'divider' ? (
                   <div key={item.id} className="flex justify-center my-6 relative z-10"><span className="bg-white/70 backdrop-blur-md text-pink-500 font-bold text-[10px] px-4 py-1.5 rounded-full border border-pink-200 shadow-sm uppercase tracking-widest">{item.label}</span></div>
                 ) : <MessageBubble key={item.id} msg={item} isMine={item.senderId === encodeData(profile.username)} />)}
@@ -601,24 +638,24 @@ function LobbyScreen({ rooms, onCreate, onSelect, profile, allUsers }) {
         {!showCreate ? (
           <button onClick={() => setShowCreate(true)} className="w-full border-4 border-dashed border-pink-300 hover:border-pink-500 bg-white/50 hover:bg-white/80 rounded-[32px] p-8 flex flex-col items-center justify-center gap-3 transition-all text-pink-500 shadow-sm group">
             <div className="bg-pink-100 group-hover:bg-pink-200 p-4 rounded-full transition-colors border-2 border-pink-200"><Plus className="w-8 h-8" /></div>
-            <span className="font-bold text-xl text-gray-700">Xây Tổ Chat Mới</span>
+            <span className="font-bold text-xl text-gray-700">Xây Tổ Chat Mới</span>
           </button>
         ) : (
           <form onSubmit={handleSubmit} className="bg-white/90 backdrop-blur-xl border-2 border-pink-200 rounded-[32px] p-8 shadow-xl shadow-pink-200/50 space-y-5 overflow-visible">
-            <div className="flex justify-between items-center mb-2"><h3 className="text-xl font-bold text-gray-800 flex items-center gap-2"><ShieldCheck className="text-pink-500" /> Xây Tổ</h3><button type="button" onClick={() => setShowCreate(false)} className="text-gray-400 hover:text-pink-500 p-2 rounded-full hover:bg-pink-50"><X className="w-5 h-5" /></button></div>
-            <div><label className="block text-sm font-bold text-gray-600 mb-2">Tên Tổ Chat</label><input type="text" value={roomName} onChange={e => setRoomName(e.target.value)} required placeholder="VD: Họp Tổ Dân Phố" className="w-full bg-white border-2 border-pink-200 rounded-xl px-4 py-3 text-gray-800 focus:outline-none focus:border-pink-400 transition-colors" /></div>
+            <div className="flex justify-between items-center mb-2"><h3 className="text-xl font-bold text-gray-800 flex items-center gap-2"><ShieldCheck className="text-pink-500" /> Xây Tổ</h3><button type="button" onClick={() => setShowCreate(false)} className="text-gray-400 hover:text-pink-500 p-2 rounded-full hover:bg-pink-50"><X className="w-5 h-5" /></button></div>
+            <div><label className="block text-sm font-bold text-gray-600 mb-2">Tên Tổ Chat</label><input type="text" value={roomName} onChange={e => setRoomName(e.target.value)} required placeholder="VD: Họp Tổ Dân Phố" className="w-full bg-white border-2 border-pink-200 rounded-xl px-4 py-3 text-gray-800 focus:outline-none focus:border-pink-400 transition-colors" /></div>
             <div className="relative">
               <label className="block text-sm font-bold text-gray-600 mb-2">Thêm thành viên</label>
               <UserAutocomplete availableUsers={allUsers.filter(u => u !== profile.username)} selectedUsers={participants} onAdd={(u) => setParticipants([...participants, u])} onRemove={(u) => setParticipants(participants.filter(x => x !== u))} />
             </div>
-            <button type="submit" className="w-full bg-gradient-to-r from-pink-400 to-pink-500 hover:from-pink-500 hover:to-pink-600 text-white font-bold py-4 px-4 rounded-xl mt-4 transition-all shadow-md border border-pink-400">Xây Tổ Thoai</button>
+            <button type="submit" className="w-full bg-gradient-to-r from-pink-400 to-pink-500 hover:from-pink-500 hover:to-pink-600 text-white font-bold py-4 px-4 rounded-xl mt-4 transition-all shadow-md border border-pink-400">Xây Tổ Thoai</button>
           </form>
         )}
 
         <div className="space-y-4">
-          <h2 className="text-lg font-bold text-gray-700 flex items-center gap-2 border-b-2 border-pink-200 pb-3"><MessageSquare className="w-5 h-5 text-pink-400" /> Các Tổ bạn đang tham gia</h2>
+          <h2 className="text-lg font-bold text-gray-700 flex items-center gap-2 border-b-2 border-pink-200 pb-3"><MessageSquare className="w-5 h-5 text-pink-400" /> Các Tổ bạn đang tham gia</h2>
           {rooms.length === 0 ? (
-            <div className="bg-white/50 backdrop-blur-sm rounded-[32px] border-2 border-pink-200 p-10 text-center"><p className="text-gray-500 font-medium">Bạn chưa tham gia Tổ chat nào.</p></div>
+            <div className="bg-white/50 backdrop-blur-sm rounded-[32px] border-2 border-pink-200 p-10 text-center"><p className="text-gray-500 font-medium">Bạn chưa tham gia Tổ chat nào.</p></div>
           ) : (
             <div className="grid gap-4 sm:grid-cols-2">
               {rooms.map(room => (
@@ -627,7 +664,7 @@ function LobbyScreen({ rooms, onCreate, onSelect, profile, allUsers }) {
                   <h3 className="relative z-10 font-black text-gray-800 text-lg truncate group-hover:text-pink-500 transition-colors">{room.name}</h3>
                   <div className="relative z-10 flex items-center justify-between mt-auto">
                     <p className="text-xs text-gray-500 font-medium flex items-center gap-1 truncate"><Users className="w-3.5 h-3.5 flex-shrink-0 text-pink-300" /> {room.allowedUsers.join(', ')}</p>
-                    <div className="bg-pink-100 text-pink-600 border border-pink-300 text-[10px] px-3 py-1.5 rounded-full font-bold ml-2 shrink-0 group-hover:bg-pink-500 group-hover:text-white transition-colors">Dô liền</div>
+                    <div className="bg-pink-100 text-pink-600 border border-pink-300 text-[10px] px-3 py-1.5 rounded-full font-bold ml-2 shrink-0 group-hover:bg-pink-500 group-hover:text-white transition-colors">Dô liền</div>
                   </div>
                 </div>
               ))}
@@ -806,7 +843,7 @@ function AuthScreen({ db, onComplete }) {
               <div className="bg-pink-400 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto mb-5 shadow-lg shadow-pink-200 rotate-3 border-2 border-pink-200">
                 <ShieldCheck className="w-10 h-10 text-white" />
               </div>
-              <h2 className="text-2xl font-black text-gray-800">Tham Gia Tổ Chat</h2>
+              <h2 className="text-2xl font-black text-gray-800">Tham Gia Tổ Chat</h2>
               <p className="text-gray-500 font-medium text-sm mt-2">
                 {step === 1 ? 'Nhập tên để đăng nhập hoặc tạo mới nha.' : (
                   isExisting ? (isResetting ? `Khôi phục PIN cho: ${username}` : `Đăng nhập: ${username}`) : `Tạo mã PIN cho: ${username}`
@@ -952,7 +989,7 @@ function LockScreen({ profile, onUnlock, onReset }) {
           <Lock className={`w-10 h-10 ${lockoutTime > 0 ? 'text-red-500 animate-bounce' : 'text-pink-500'}`} />
         </div>
         <h2 className={`text-2xl font-black mb-1 ${lockoutTime > 0 ? 'text-red-500' : 'text-gray-800'}`}>
-          {lockoutTime > 0 ? 'CẢNH BÁO!' : 'Đã Khóa Tổ'}
+          {lockoutTime > 0 ? 'CẢNH BÁO!' : 'Đã Khóa Tổ'}
         </h2>
         
         {lockoutTime > 0 ? (
@@ -1076,7 +1113,7 @@ function RoomMembersModal({ room, allUsers, onClose, onAddMember }) {
         </div>
         <div className="p-6 space-y-6">
           <div className="bg-pink-50/50 p-4 rounded-2xl border-2 border-pink-100">
-            <h4 className="text-gray-700 text-sm font-bold flex items-center gap-2 mb-1"><Clock className="w-4 h-4 text-pink-400" /> Log Tổ Chat</h4>
+            <h4 className="text-gray-700 text-sm font-bold flex items-center gap-2 mb-1"><Clock className="w-4 h-4 text-pink-400" /> Log Tổ Chat</h4>
             <p className="text-xs text-gray-500 font-medium ml-6">Tạo lúc: {room.createdAt ? new Date(room.createdAt).toLocaleString('vi-VN') : 'Chưa rõ'}</p>
           </div>
           <div>
