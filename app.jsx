@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, addDoc, updateDoc, arrayUnion } from 'firebase/firestore';
-import { Camera, Send, Image as ImageIcon, Smile, Lock, X, Video, Upload, ShieldCheck, AlertCircle, LogOut, Users, Plus, ArrowLeft, MessageSquare, UserPlus, Info, Check, Search, XCircle, Clock } from 'lucide-react';
+import { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, addDoc, updateDoc, arrayUnion, deleteDoc } from 'firebase/firestore';
+import { getStorage, ref as storageRef, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
+import { Camera, Send, Image as ImageIcon, Smile, Lock, X, Video, Upload, ShieldCheck, AlertCircle, LogOut, Users, Plus, ArrowLeft, MessageSquare, UserPlus, Info, Check, Search, XCircle, Clock, Settings, Trash2, RefreshCw, Images, Film, Download, Mic, Square } from 'lucide-react';
 
 const backgroundStyles = `
   @keyframes float {
@@ -35,21 +36,10 @@ const FloatingBackground = () => (
   </>
 );
 
-// --- FIREBASE INITIALIZATION ---
-const USER_CONFIG = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
-};
-
-const isCustomConfigValid = true; // We assume valid config will be loaded from worker
+const isCustomConfigValid = true; 
 const canvasAppId = typeof __app_id !== 'undefined' ? __app_id : 'secure-chat';
 
-let app, auth, db;
-// Initialization is deferred until config is fetched
+let app, auth, db, storage;
 
 const encodeData = (str) => btoa(encodeURIComponent(str));
 const decodeData = (str) => {
@@ -67,6 +57,7 @@ const getStickersCollection = () => isCustomConfigValid ? collection(db, 'custom
 const getDirectoryCollection = () => isCustomConfigValid ? collection(db, 'user_directory') : collection(db, 'artifacts', canvasAppId, 'public', 'data', 'user_directory');
 const getUserProfileDoc = (username) => isCustomConfigValid ? doc(db, 'users', encodeData(username)) : doc(db, 'artifacts', canvasAppId, 'users', encodeData(username), 'user_profile', 'main');
 const getLogsCollection = () => isCustomConfigValid ? collection(db, 'activity_logs') : collection(db, 'artifacts', canvasAppId, 'public', 'data', 'activity_logs');
+const getUserSessionDoc = (uid) => isCustomConfigValid ? doc(db, 'user_sessions', uid) : doc(db, 'artifacts', canvasAppId, 'users', uid, 'user_session', 'main');
 
 const logActivity = async (action, username, details = {}) => {
   if (!db) return;
@@ -75,7 +66,7 @@ const logActivity = async (action, username, details = {}) => {
   } catch (err) {}
 };
 
-const LOCK_TIMEOUT_MS = 30 * 60 * 1000;
+const LOCK_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
 const MAX_VIDEO_SIZE = 24 * 1024 * 1024;
 
@@ -112,6 +103,28 @@ const playAlarmSound = () => {
   } catch (e) {}
 };
 
+// --- HELPER FUNCTION: UPLOAD LÊN FIREBASE STORAGE ---
+const uploadFileToStorage = (fileOrBlob, path, onSuccess, onError) => {
+  if (!storage) {
+    onError(new Error("Chưa cấu hình Storage"));
+    return;
+  }
+  try {
+    const fileReference = storageRef(storage, path);
+    const uploadTask = uploadBytesResumable(fileReference, fileOrBlob);
+    uploadTask.on('state_changed', 
+      null, 
+      (error) => onError(error), 
+      async () => {
+        const url = await getDownloadURL(uploadTask.snapshot.ref);
+        onSuccess(url);
+      }
+    );
+  } catch(e) {
+    onError(e);
+  }
+};
+
 export default function App() {
   const [configLoaded, setConfigLoaded] = useState(false);
   const [user, setUser] = useState(null);
@@ -131,9 +144,21 @@ export default function App() {
   const [showStickers, setShowStickers] = useState(false);
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
   const [showMembersModal, setShowMembersModal] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showMediaGallery, setShowMediaGallery] = useState(false);
+  const [pinPrompt, setPinPrompt] = useState(null);
   const [notification, setNotification] = useState('');
+  const [msgToDelete, setMsgToDelete] = useState(null);
   
   const [previewImage, setPreviewImage] = useState(null);
+  const [previewAudio, setPreviewAudio] = useState(null);
+  
+  // Thêm state cho tính năng lật Camera
+  const [facingMode, setFacingMode] = useState('user');
+  
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
 
   const [visibleDaysCount, setVisibleDaysCount] = useState(1);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
@@ -157,18 +182,25 @@ export default function App() {
   useEffect(() => {
     const fetchConfig = async () => {
       try {
-        // TODO: Replace with your actual Cloudflare Worker URL
         const response = await fetch('https://snatcake.tronghieu1042.workers.dev');
         if (!response.ok) throw new Error('Failed to fetch config');
         const config = await response.json();
         
         if (!config || !config.projectId) {
-          throw new Error('Cấu hình Firebase không hợp lệ (thiếu projectId). Hãy kiểm tra biến môi trường trong Cloudflare Worker.');
+          throw new Error('Cấu hình Firebase không hợp lệ. Hãy kiểm tra biến môi trường trong Cloudflare Worker.');
         }
 
         app = initializeApp(config);
         auth = getAuth(app);
         db = getFirestore(app);
+        
+        // Khởi tạo Storage nếu có config
+        if (config.storageBucket) {
+          try {
+            storage = getStorage(app);
+          } catch(e) { console.warn("Không thể khởi tạo Firebase Storage."); }
+        }
+        
         setConfigLoaded(true);
       } catch (err) {
         console.error(err);
@@ -188,19 +220,43 @@ export default function App() {
       return;
     }
     const initAuth = async () => {
-      try {
-        await signInAnonymously(auth);
-      } catch (err) {
-        setLoading(false);
-      }
+      try { await signInAnonymously(auth); } catch (err) { setLoading(false); }
     };
     initAuth();
+    
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
-      if (currentUser) setLoading(false);
+      if (currentUser) {
+        try {
+          const sessionSnap = await getDoc(getUserSessionDoc(currentUser.uid));
+          if (sessionSnap.exists()) {
+            const savedUsername = sessionSnap.data().username;
+            const profileSnap = await getDoc(getUserProfileDoc(savedUsername));
+            if (profileSnap.exists()) {
+              const pData = profileSnap.data();
+              setProfile({ ...pData, username: decodeData(pData.username) });
+              setIsLocked(true); 
+            }
+          }
+        } catch (err) { console.error("Lỗi đồng bộ session", err); }
+        setLoading(false);
+      }
     });
     return () => unsubscribe();
   }, [configLoaded]);
+
+  const handleLoginComplete = async (profileData) => {
+    setProfile(profileData);
+    setIsLocked(false);
+    if (user) {
+      try { await setDoc(getUserSessionDoc(user.uid), { username: profileData.username }); } catch (err) {}
+    }
+  };
+
+  const handleResetProfile = async () => {
+    if (user) { try { await deleteDoc(getUserSessionDoc(user.uid)); } catch(e){} }
+    setProfile(null);
+  };
 
   const lockApp = () => {
     setIsLocked(true);
@@ -209,7 +265,8 @@ export default function App() {
     showNotification("Ứng dụng đã tự động khóa để bảo mật.");
   };
 
-  const logoutApp = () => {
+  const logoutApp = async () => {
+    if (user) { try { await deleteDoc(getUserSessionDoc(user.uid)); } catch(e){} }
     setProfile(null);
     setIsLocked(true);
     setMessages([]);
@@ -252,12 +309,26 @@ export default function App() {
     const unsubscribeRooms = onSnapshot(getRoomsCollection(), (snapshot) => {
       const allRooms = snapshot.docs.map(doc => {
         const data = doc.data();
-        return { id: doc.id, ...data, allowedUsers: data.allowedUsers ? data.allowedUsers.map(decodeData) : [], createdBy: data.createdBy ? decodeData(data.createdBy) : 'Unknown' };
+        return { 
+          id: doc.id, 
+          ...data, 
+          isDeleted: data.isDeleted || false,
+          allowedUsers: data.allowedUsers ? data.allowedUsers.map(decodeData) : [], 
+          createdBy: data.createdBy ? decodeData(data.createdBy) : 'Unknown' 
+        };
       });
       const myRooms = allRooms.filter(r => r.allowedUsers.includes(profile.username));
       myRooms.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
       setRooms(myRooms);
-      setCurrentRoom(prev => prev ? (myRooms.find(r => r.id === prev.id) || prev) : prev);
+      
+      setCurrentRoom(prev => {
+        if (prev) {
+          const updated = allRooms.find(r => r.id === prev.id);
+          if (!updated || updated.isDeleted || !updated.allowedUsers.includes(profile.username)) return null;
+          return updated;
+        }
+        return prev;
+      });
     });
     return () => { unsubDir(); unsubscribeRooms(); };
   }, [user, isLocked, profile, db]);
@@ -278,6 +349,9 @@ export default function App() {
     }
     return () => { unsubscribeStickers(); unsubscribeMessages(); };
   }, [user, isLocked, currentRoom, db]);
+
+  const activeRooms = rooms.filter(r => !r.isDeleted);
+  const archivedRooms = rooms.filter(r => r.isDeleted && r.createdBy === profile.username);
 
   const uniqueDays = [...new Set(messages.map(m => new Date(m.timestamp).setHours(0,0,0,0)))].sort((a,b) => b - a);
   const visibleDays = uniqueDays.slice(0, visibleDaysCount);
@@ -304,22 +378,15 @@ export default function App() {
   });
 
   const handleChatScroll = (e) => {
-    // Thêm cờ bảo vệ isLoadingMore để tránh bị dội event (trigger nhiều lần)
     if (e.target.scrollTop === 0 && visibleDaysCount < uniqueDays.length && !scrollDataRef.current.isLoadingMore) {
       scrollDataRef.current = { oldHeight: e.target.scrollHeight, isLoadingMore: true };
       setIsLoadingHistory(true);
-      
-      // Tạo độ trễ nhẹ để hiển thị UI tải và gom request
-      setTimeout(() => {
-        setVisibleDaysCount(prev => prev + 1);
-      }, 500);
+      setTimeout(() => { setVisibleDaysCount(prev => prev + 1); }, 500);
     }
   };
 
   useEffect(() => {
     if (!chatContainerRef.current) return;
-    
-    // Dùng requestAnimationFrame để chắc chắn DOM đã cập nhật xong layout
     requestAnimationFrame(() => {
       if (!chatContainerRef.current) return;
       if (scrollDataRef.current.isLoadingMore) {
@@ -338,9 +405,9 @@ export default function App() {
     let users = [...participantsList];
     if (!users.includes(profile.username)) users.push(profile.username);
     try {
-      const roomRef = await addDoc(getRoomsCollection(), { name: name.trim(), allowedUsers: users.map(encodeData), createdAt: Date.now(), createdBy: encodeData(profile.username) });
+      const roomRef = await addDoc(getRoomsCollection(), { name: name.trim(), allowedUsers: users.map(encodeData), isDeleted: false, createdAt: Date.now(), createdBy: encodeData(profile.username) });
       await logActivity('CREATE_ROOM', profile.username, { roomName: encodeData(name.trim()), roomId: roomRef.id });
-      await addDoc(getMessagesCollection(), { roomId: roomRef.id, senderId: 'system', senderName: encodeData('Hệ thống'), text: `Tổ chat "${name.trim()}" được tạo bởi ${profile.username}.`, isSystem: true, timestamp: Date.now() });
+      await addDoc(getMessagesCollection(), { roomId: roomRef.id, senderId: 'system', senderName: encodeData('Hệ thống'), text: `Tổ "${name.trim()}" được tạo bởi ${profile.username}.`, isSystem: true, timestamp: Date.now() });
       showNotification("Đã tạo Tổ chat mới!");
     } catch(err) { showNotification("Lỗi khi tạo Tổ."); }
   };
@@ -353,6 +420,52 @@ export default function App() {
       await logActivity('ADD_MEMBER', profile.username, { roomId: currentRoom.id, addedUser: encodeData(newMember) });
       showNotification(`Đã thêm ${newMember} vào Tổ!`);
     } catch (err) { showNotification("Lỗi khi thêm thành viên."); }
+  };
+
+  const handleSoftDeleteRoom = (room) => {
+    setPinPrompt({
+      title: `Xóa tạm thời "${room.name}"?`,
+      action: async () => {
+        await updateDoc(doc(getRoomsCollection(), room.id), { isDeleted: true });
+        showNotification("Đã chuyển Tổ vào thùng rác.");
+        setPinPrompt(null);
+        setCurrentRoom(null);
+        setShowMembersModal(false);
+      }
+    });
+  };
+
+  const handleHardDeleteRoom = (room) => {
+    setPinPrompt({
+      title: `Xóa VĨNH VIỄN "${room.name}"?`,
+      action: async () => {
+        await deleteDoc(doc(getRoomsCollection(), room.id));
+        showNotification("Đã xóa vĩnh viễn.");
+        setPinPrompt(null);
+      }
+    });
+  };
+
+  const handleRestoreRoom = async (room) => {
+    try {
+      await updateDoc(doc(getRoomsCollection(), room.id), { isDeleted: false });
+      showNotification(`Đã khôi phục Tổ "${room.name}"!`);
+    } catch (err) { showNotification("Lỗi khi khôi phục."); }
+  };
+
+  const handleDeleteMessageClick = (msg) => {
+    setMsgToDelete(msg);
+  };
+
+  const confirmDeleteMessage = async () => {
+    if (!msgToDelete) return;
+    try {
+      await deleteDoc(doc(getMessagesCollection(), msgToDelete.id));
+      showNotification("Đã thu hồi tin nhắn.");
+    } catch (err) { 
+      showNotification("Lỗi khi thu hồi tin nhắn."); 
+    }
+    setMsgToDelete(null);
   };
 
   const handleSendMessage = async (text, mediaUrl = null, mediaType = null) => {
@@ -394,10 +507,13 @@ export default function App() {
     const file = e.target ? e.target.files[0] : e.files?.[0];
     if (!file) return;
     if (type === 'video') {
-      if (file.size > MAX_VIDEO_SIZE) return showNotification(`Video quá lớn.`);
-      const reader = new FileReader();
-      reader.onloadend = () => handleSendMessage('', reader.result, type);
-      reader.readAsDataURL(file);
+      return showNotification('Tính năng gửi video đang được tạm khóa do giới hạn lưu trữ.');
+      /*
+      // Đã khóa logic cũ
+      if (file.size > MAX_VIDEO_SIZE) return showNotification(`Video quá lớn (Giới hạn 24MB).`);
+      setShowAttachmentMenu(false);
+      ...
+      */
     } else if (type === 'image') {
       if (file.size > MAX_IMAGE_SIZE) return showNotification(`Ảnh quá lớn.`);
       const reader = new FileReader();
@@ -457,13 +573,63 @@ export default function App() {
     e.target.value = null;
   };
 
-  const openCamera = async () => {
-    setShowCamera(true); setShowAttachmentMenu(false);
+  // AUDIO RECORDING
+  const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        if (audioBlob.size > 700 * 1024 && !storage) {
+          showNotification('Chưa cấu hình Storage, giới hạn ghi âm 700KB. Thử lại ngắn hơn.');
+          return;
+        }
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          setPreviewAudio({ base64: reader.result, blob: audioBlob, url: URL.createObjectURL(audioBlob) });
+        };
+        reader.readAsDataURL(audioBlob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      showNotification("Không thể truy cập Micro.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const openCamera = async (mode = facingMode) => {
+    setShowCamera(true); setShowAttachmentMenu(false);
+    // Dừng luồng camera hiện tại nếu đang mở trước khi chuyển đổi
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: mode } });
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch (err) { setShowCamera(false); }
+    } catch (err) { setShowCamera(false); showNotification("Không thể truy cập Camera."); }
+  };
+
+  const toggleCamera = () => {
+    const newMode = facingMode === 'user' ? 'environment' : 'user';
+    setFacingMode(newMode);
+    openCamera(newMode); // Mở lại camera với hướng mới
   };
 
   const closeCamera = () => {
@@ -475,21 +641,44 @@ export default function App() {
     if (!videoRef.current) return;
     const canvas = document.createElement('canvas');
     canvas.width = videoRef.current.videoWidth; canvas.height = videoRef.current.videoHeight;
-    canvas.getContext('2d').drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+    const ctx = canvas.getContext('2d');
+    
+    // Nếu dùng camera trước, lật ảnh lại để giống như gương
+    if (facingMode === 'user') {
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+    }
+    
+    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
     setPreviewImage(canvas.toDataURL('image/jpeg', 0.7));
     closeCamera();
   };
 
   const onSendChat = () => {
-    handleSendMessage(newMessage, previewImage, previewImage ? 'image' : null);
-    setPreviewImage(null);
+    if (previewAudio) {
+      if (storage) {
+        showNotification("Đang tải tin nhắn thoại lên...");
+        uploadFileToStorage(
+          previewAudio.blob,
+          `secure_chat/audio/${Date.now()}_voice.webm`,
+          (url) => { handleSendMessage(newMessage, url, 'audio'); setPreviewAudio(null); },
+          (err) => showNotification("Lỗi tải thoại.")
+        );
+      } else {
+        handleSendMessage(newMessage, previewAudio.base64, 'audio');
+        setPreviewAudio(null);
+      }
+    } else {
+      handleSendMessage(newMessage, previewImage, previewImage ? 'image' : null);
+      setPreviewImage(null);
+    }
   };
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-pink-50 text-pink-500"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-pink-500"></div></div>;
   if (errorMsg) return <div className="min-h-screen flex items-center justify-center bg-pink-50 p-4"><div className="bg-white p-6 rounded-2xl shadow-xl border-2 border-red-200 text-center"><div className="text-red-500 font-bold text-lg mb-2">Lỗi Kết Nối</div><p className="text-gray-600">{errorMsg}</p></div></div>;
   if (!user) return <div className="min-h-screen flex items-center justify-center bg-pink-50"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-pink-400"></div></div>;
-  if (!profile) return <AuthScreen db={db} onComplete={(p) => setProfile(p)} />;
-  if (isLocked) return <LockScreen profile={profile} onUnlock={() => setIsLocked(false)} onReset={() => setProfile(null)} />;
+  if (!profile) return <AuthScreen db={db} onComplete={handleLoginComplete} />;
+  if (isLocked) return <LockScreen profile={profile} onUnlock={() => setIsLocked(false)} onReset={handleResetProfile} />;
 
   return (
     <div className="h-[100dvh] w-full bg-gradient-to-br from-pink-100 via-white to-blue-100 text-gray-800 font-sans flex flex-col relative overflow-hidden">
@@ -527,8 +716,18 @@ export default function App() {
               </div>
             </div>
           </div>
+          
+          {!currentRoom && (
+            <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-pink-50 rounded-full transition-colors text-gray-500 hover:text-pink-500 border border-transparent hover:border-pink-200" title="Cài đặt">
+              <Settings className="w-5 h-5" />
+            </button>
+          )}
+
           {currentRoom && (
             <>
+              <button onClick={() => setShowMediaGallery(true)} className="p-2 hover:bg-pink-50 rounded-full transition-colors text-gray-500 hover:text-pink-500 border border-transparent hover:border-pink-200" title="Kho Media">
+                <Images className="w-5 h-5" />
+              </button>
               <button onClick={() => bgInputRef.current?.click()} className="p-2 hover:bg-pink-50 rounded-full transition-colors text-gray-500 hover:text-pink-500 border border-transparent hover:border-pink-200" title="Đổi hình nền">
                 <ImageIcon className="w-5 h-5" />
               </button>
@@ -547,7 +746,7 @@ export default function App() {
       </header>
 
       {!currentRoom ? (
-        <LobbyScreen rooms={rooms} onCreate={handleCreateRoom} onSelect={setCurrentRoom} profile={profile} allUsers={allUsers} />
+        <LobbyScreen rooms={activeRooms} onCreate={handleCreateRoom} onSelect={setCurrentRoom} profile={profile} allUsers={allUsers} />
       ) : (
         <div className="flex-1 relative overflow-hidden flex flex-col z-10">
           {currentRoom.bgUrl && <div className="absolute inset-0 z-0 bg-cover bg-center opacity-40 pointer-events-none" style={{ backgroundImage: `url(${currentRoom.bgUrl})` }} />}
@@ -562,7 +761,7 @@ export default function App() {
                 {isLoadingHistory && <div className="text-center text-[10px] font-bold text-pink-400 py-2 animate-pulse uppercase tracking-widest">Đang tải thêm lịch sử...</div>}
                 {groupedMessages.map((item) => item.type === 'divider' ? (
                   <div key={item.id} className="flex justify-center my-6 relative z-10"><span className="bg-white/70 backdrop-blur-md text-pink-500 font-bold text-[10px] px-4 py-1.5 rounded-full border border-pink-200 shadow-sm uppercase tracking-widest">{item.label}</span></div>
-                ) : <MessageBubble key={item.id} msg={item} isMine={item.senderId === encodeData(profile.username)} />)}
+                ) : <MessageBubble key={item.id} msg={item} isMine={item.senderId === encodeData(profile.username)} onDelete={handleDeleteMessageClick} />)}
               </>
             )}
             <div ref={messagesEndRef} />
@@ -580,13 +779,22 @@ export default function App() {
             {showAttachmentMenu && (
               <div className="absolute bottom-full mb-2 left-4 bg-white border-2 border-pink-200 rounded-2xl p-2 shadow-xl shadow-pink-200/30 flex flex-col gap-1 w-64">
                 <label className="flex items-center gap-3 p-3 hover:bg-pink-50 text-gray-700 rounded-xl cursor-pointer transition-colors font-medium border border-transparent hover:border-pink-100"><ImageIcon className="text-blue-400 w-5 h-5 flex-shrink-0" /> <span className="text-sm">Gửi Hình</span><input type="file" accept="image/*" className="hidden" onChange={(e) => handleFileUpload(e, 'image')} /></label>
-                <label className="flex items-center gap-3 p-3 hover:bg-pink-50 text-gray-700 rounded-xl cursor-pointer transition-colors font-medium border border-transparent hover:border-pink-100"><Video className="text-purple-400 w-5 h-5 flex-shrink-0" /> <span className="text-sm">Gửi Video</span><input type="file" accept="video/*" className="hidden" onChange={(e) => handleFileUpload(e, 'video')} /></label>
-                <button onClick={openCamera} className="flex items-center gap-3 p-3 hover:bg-pink-50 text-gray-700 rounded-xl text-left transition-colors font-medium border border-transparent hover:border-pink-100"><Camera className="text-pink-400 w-5 h-5 flex-shrink-0" /> <span className="text-sm">Chụp Webcam</span></button>
+                <button disabled className="flex items-center gap-3 p-3 text-gray-400 rounded-xl text-left cursor-not-allowed font-medium border border-transparent" title="Tạm khóa tính năng gửi video"><Video className="text-gray-300 w-5 h-5 flex-shrink-0" /> <span className="text-sm line-through">Gửi Video</span></button>
+                <button onClick={() => openCamera(facingMode)} className="flex items-center gap-3 p-3 hover:bg-pink-50 text-gray-700 rounded-xl text-left transition-colors font-medium border border-transparent hover:border-pink-100"><Camera className="text-pink-400 w-5 h-5 flex-shrink-0" /> <span className="text-sm">Chụp Ảnh</span></button>
               </div>
             )}
             <div className="flex items-end gap-2 max-w-5xl mx-auto">
               <button onClick={() => { setShowAttachmentMenu(!showAttachmentMenu); setShowStickers(false); }} className={`p-3 rounded-full transition-colors ${showAttachmentMenu ? 'bg-pink-500 text-white shadow-md border-2 border-pink-500' : 'bg-white text-gray-500 hover:text-pink-500 hover:bg-pink-50 shadow-sm border-2 border-pink-200'}`}><Plus className="w-5 h-5" /></button>
               <button onClick={() => { setShowStickers(!showStickers); setShowAttachmentMenu(false); }} className={`p-3 rounded-full transition-colors ${showStickers ? 'bg-yellow-400 text-white shadow-md border-2 border-yellow-400' : 'bg-white text-gray-500 hover:text-yellow-500 hover:bg-yellow-50 shadow-sm border-2 border-pink-200'}`}><Smile className="w-5 h-5" /></button>
+              
+              <button 
+                onClick={isRecording ? stopRecording : startRecording} 
+                className={`p-3 rounded-full transition-colors ${isRecording ? 'bg-red-500 text-white animate-pulse shadow-md border-2 border-red-500' : 'bg-white text-gray-500 hover:text-pink-500 hover:bg-pink-50 shadow-sm border-2 border-pink-200'}`}
+                title={isRecording ? "Dừng ghi âm" : "Ghi âm"}
+              >
+                {isRecording ? <Square className="w-5 h-5 fill-current" /> : <Mic className="w-5 h-5" />}
+              </button>
+
               <div className="flex-1 bg-white rounded-2xl flex flex-col justify-center p-1.5 border-2 border-pink-200 focus-within:border-pink-400 focus-within:ring-2 focus-within:ring-pink-200 shadow-sm transition-all">
                 {previewImage && (
                   <div className="relative self-start mb-1 ml-2 mt-1">
@@ -594,23 +802,94 @@ export default function App() {
                     <button onClick={() => setPreviewImage(null)} className="absolute -top-2 -right-2 bg-white hover:bg-red-50 text-gray-400 hover:text-red-500 border border-pink-100 rounded-full p-1 shadow-md transition-colors"><X className="w-4 h-4" /></button>
                   </div>
                 )}
+                {previewAudio && (
+                  <div className="relative self-start mb-1 ml-2 mt-1 flex items-center bg-pink-50 rounded-xl border border-pink-200 p-1 pr-2 shadow-sm">
+                    <audio src={previewAudio.url} controls className="h-10 w-64 max-w-[200px] sm:max-w-xs" />
+                    <button onClick={() => { setPreviewAudio(null); URL.revokeObjectURL(previewAudio.url); }} className="ml-2 text-gray-400 hover:text-red-500 transition-colors p-1" title="Xóa ghi âm"><Trash2 className="w-5 h-5" /></button>
+                  </div>
+                )}
                 <div className="flex items-end w-full">
-                  <textarea value={newMessage} onChange={(e) => setNewMessage(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSendChat(); } }} onPaste={handlePaste} placeholder="Nhập tin nhắn..." className="flex-1 bg-transparent text-gray-800 p-2 outline-none resize-none max-h-32 min-h-[44px]" rows={1} />
-                  <button onClick={onSendChat} disabled={!newMessage.trim() && !previewImage} className="p-2 mb-1 mr-1 bg-pink-400 hover:bg-pink-500 disabled:bg-gray-200 disabled:text-gray-400 text-white rounded-xl transition-colors shadow-sm border border-transparent shrink-0"><Send className="w-5 h-5" /></button>
+                  <textarea value={newMessage} onChange={(e) => setNewMessage(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSendChat(); } }} onPaste={handlePaste} placeholder={isRecording ? "Đang ghi âm..." : "Nhập tin nhắn..."} disabled={isRecording} className="flex-1 bg-transparent text-gray-800 p-2 outline-none resize-none max-h-32 min-h-[44px] disabled:opacity-50" rows={1} />
+                  <button onClick={onSendChat} disabled={(!newMessage.trim() && !previewImage && !previewAudio) || isRecording} className="p-2 mb-1 mr-1 bg-pink-400 hover:bg-pink-500 disabled:bg-gray-200 disabled:text-gray-400 text-white rounded-xl transition-colors shadow-sm border border-transparent shrink-0"><Send className="w-5 h-5" /></button>
                 </div>
               </div>
             </div>
           </footer>
         </div>
       )}
-      {notification && <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-white text-pink-500 font-bold px-6 py-3 rounded-full shadow-2xl border-2 border-pink-200 z-50 text-sm animate-fade-in-down flex items-center gap-2"><div className="w-2 h-2 bg-pink-400 rounded-full animate-ping"></div> {notification}</div>}
-      {showMembersModal && currentRoom && <RoomMembersModal room={currentRoom} allUsers={allUsers} onClose={() => setShowMembersModal(false)} onAddMember={handleAddMember} />}
+
+      {/* Thông báo đẩy */}
+      {notification && <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-white text-pink-500 font-bold px-6 py-3 rounded-full shadow-2xl border-2 border-pink-200 z-[100] text-sm animate-fade-in-down flex items-center gap-2"><div className="w-2 h-2 bg-pink-400 rounded-full animate-ping"></div> {notification}</div>}
+      
+      {/* Modal Xác Nhận Thu Hồi Tin Nhắn */}
+      {msgToDelete && (
+        <div className="fixed inset-0 bg-white/60 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-white border-2 border-pink-200 rounded-[32px] shadow-2xl shadow-pink-200 p-8 text-center animate-fade-in-down">
+            <div className="bg-red-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-100">
+              <Trash2 className="w-8 h-8 text-red-400" />
+            </div>
+            <h3 className="font-black text-gray-800 text-xl mb-2">Thu hồi tin nhắn?</h3>
+            <p className="text-sm text-gray-500 mb-6 font-medium">Tin nhắn này sẽ bị xóa khỏi tất cả thiết bị. Bạn có chắc chắn không?</p>
+            
+            <div className="flex gap-2">
+              <button onClick={() => setMsgToDelete(null)} className="flex-1 bg-gray-100 text-gray-600 font-bold py-3 rounded-xl hover:bg-gray-200 transition-colors">Hủy</button>
+              <button onClick={confirmDeleteMessage} className="flex-1 bg-red-500 text-white font-bold py-3 rounded-xl hover:bg-red-600 transition-colors shadow-md border border-red-600">Thu hồi</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMembersModal && currentRoom && (
+        <RoomMembersModal 
+          room={currentRoom} 
+          profile={profile}
+          allUsers={allUsers} 
+          onClose={() => setShowMembersModal(false)} 
+          onAddMember={handleAddMember} 
+          onSoftDelete={handleSoftDeleteRoom}
+        />
+      )}
+      
+      {showSettings && (
+        <SettingsModal 
+          profile={profile} 
+          archivedRooms={archivedRooms} 
+          onClose={() => setShowSettings(false)} 
+          onRestore={handleRestoreRoom} 
+          onHardDelete={handleHardDeleteRoom} 
+        />
+      )}
+
+      {pinPrompt && (
+        <PinPromptModal 
+          title={pinPrompt.title} 
+          profile={profile} 
+          onConfirm={pinPrompt.action} 
+          onCancel={() => setPinPrompt(null)} 
+        />
+      )}
+
+      {showMediaGallery && currentRoom && (
+        <MediaGalleryModal 
+          messages={messages} 
+          onClose={() => setShowMediaGallery(false)} 
+        />
+      )}
+
       {showCamera && (
-        <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center p-4">
+        <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[60] flex flex-col items-center justify-center p-4">
           <div className="relative w-full max-w-lg bg-white rounded-3xl overflow-hidden border-2 border-pink-300 shadow-2xl shadow-pink-200">
-            <div className="flex justify-between items-center p-5 border-b-2 border-pink-100"><h3 className="text-gray-800 font-bold flex items-center gap-2 text-lg"><Camera className="w-5 h-5 text-pink-400" /> Chụp Ảnh</h3><button onClick={closeCamera} className="text-gray-400 hover:text-pink-500 bg-pink-50 border border-pink-200 rounded-full p-2"><X className="w-5 h-5" /></button></div>
-            <div className="relative bg-black aspect-video flex items-center justify-center"><video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" /></div>
-            <div className="p-6 flex justify-center bg-gray-50 border-t-2 border-pink-100"><button onClick={capturePhoto} className="bg-pink-500 hover:bg-pink-600 text-white rounded-full w-16 h-16 flex items-center justify-center border-4 border-pink-200 shadow-lg active:scale-95"><Camera className="w-7 h-7" /></button></div>
+            <div className="flex justify-between items-center p-5 border-b-2 border-pink-100">
+              <h3 className="text-gray-800 font-bold flex items-center gap-2 text-lg"><Camera className="w-5 h-5 text-pink-400" /> Chụp Ảnh</h3>
+              <div className="flex items-center gap-2">
+                <button onClick={toggleCamera} className="text-pink-500 hover:text-pink-600 bg-pink-50 hover:bg-pink-100 border border-pink-200 rounded-full p-2 transition-colors" title="Lật Camera"><RefreshCw className="w-5 h-5" /></button>
+                <button onClick={closeCamera} className="text-gray-400 hover:text-pink-500 bg-pink-50 hover:bg-pink-100 border border-pink-200 rounded-full p-2 transition-colors"><X className="w-5 h-5" /></button>
+              </div>
+            </div>
+            <div className="relative bg-black aspect-video flex items-center justify-center">
+              <video ref={videoRef} autoPlay playsInline className={`w-full h-full object-cover ${facingMode === 'user' ? 'scale-x-[-1]' : ''}`} />
+            </div>
+            <div className="p-6 flex justify-center bg-gray-50 border-t-2 border-pink-100"><button onClick={capturePhoto} className="bg-pink-500 hover:bg-pink-600 text-white rounded-full w-16 h-16 flex items-center justify-center border-4 border-pink-200 shadow-lg active:scale-95 transition-transform"><Camera className="w-7 h-7" /></button></div>
           </div>
         </div>
       )}
@@ -638,7 +917,7 @@ function LobbyScreen({ rooms, onCreate, onSelect, profile, allUsers }) {
         {!showCreate ? (
           <button onClick={() => setShowCreate(true)} className="w-full border-4 border-dashed border-pink-300 hover:border-pink-500 bg-white/50 hover:bg-white/80 rounded-[32px] p-8 flex flex-col items-center justify-center gap-3 transition-all text-pink-500 shadow-sm group">
             <div className="bg-pink-100 group-hover:bg-pink-200 p-4 rounded-full transition-colors border-2 border-pink-200"><Plus className="w-8 h-8" /></div>
-            <span className="font-bold text-xl text-gray-700">Xây Tổ Chat Mới</span>
+            <span className="font-bold text-xl text-gray-700">Xây Tổ Chat Mới 😶‍🌫️</span>
           </button>
         ) : (
           <form onSubmit={handleSubmit} className="bg-white/90 backdrop-blur-xl border-2 border-pink-200 rounded-[32px] p-8 shadow-xl shadow-pink-200/50 space-y-5 overflow-visible">
@@ -676,20 +955,37 @@ function LobbyScreen({ rooms, onCreate, onSelect, profile, allUsers }) {
   );
 }
 
-function MessageBubble({ msg, isMine }) {
+function MessageBubble({ msg, isMine, onDelete }) {
   const timeStr = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '';
+  
+  // Xác định khoảng thời gian được phép xóa (24h)
+  const isDeletable = msg.timestamp && (Date.now() - msg.timestamp <= 24 * 60 * 60 * 1000);
+
   if (msg.isSystem) return <div className="flex justify-center my-4 relative z-10"><div className="bg-pink-50 text-pink-500 font-medium text-xs px-4 py-2 rounded-full border-2 border-pink-200 flex items-center gap-2 shadow-sm"><Info className="w-4 h-4 text-blue-400" /><span>{msg.text}</span><span className="opacity-50 ml-1">({timeStr})</span></div></div>;
   return (
-    <div className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} mb-4 relative z-10`}>
+    <div className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} mb-4 relative z-10 group/msgwrap`}>
       <div className="flex items-end gap-2 max-w-[85%] sm:max-w-[70%]">
+        {isMine && !msg.isSystem && isDeletable && (
+          <button onClick={() => onDelete(msg)} className="opacity-100 sm:opacity-0 sm:group-hover/msgwrap:opacity-100 mb-2 p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-all flex-shrink-0" title="Thu hồi tin nhắn">
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
         {!isMine && <div className="w-8 h-8 rounded-full bg-pink-100 flex items-center justify-center text-xs font-bold text-pink-500 mb-1 flex-shrink-0 shadow-sm border-2 border-pink-200">{msg.senderName.charAt(0).toUpperCase()}</div>}
         <div className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}>
           {!isMine && <span className="text-[11px] font-bold text-gray-500 px-1 ml-1 mb-1">{msg.senderName}</span>}
-          <div className={`p-3.5 rounded-2xl relative group shadow-sm ${isMine ? 'bg-gradient-to-br from-pink-400 to-pink-500 text-white rounded-br-sm border border-pink-500' : 'bg-white text-gray-800 rounded-bl-sm border border-pink-200'}`}>
+          <div className={`p-3.5 rounded-2xl relative group/msg shadow-sm ${isMine ? 'bg-gradient-to-br from-pink-400 to-pink-500 text-white rounded-br-sm border border-pink-500' : 'bg-white text-gray-800 rounded-bl-sm border border-pink-200'}`}>
             {msg.mediaUrl && (
-              <div className="mb-2 rounded-xl overflow-hidden border border-black/5">
-                {msg.mediaType === 'image' && <img src={msg.mediaUrl} alt="attachment" className="max-w-full max-h-64 object-cover" loading="lazy" />}
+              <div className="mb-2 rounded-xl overflow-hidden border border-black/5 relative group/media">
+                {msg.mediaType === 'image' && (
+                  <>
+                    <img src={msg.mediaUrl} alt="attachment" className="max-w-full max-h-64 object-cover" loading="lazy" />
+                    <a href={msg.mediaUrl} download={`image-${msg.timestamp}.jpg`} className="absolute top-2 right-2 p-1.5 bg-black/50 text-white rounded-full opacity-0 group-hover/media:opacity-100 transition-opacity hover:bg-black/70">
+                      <Download className="w-4 h-4" />
+                    </a>
+                  </>
+                )}
                 {msg.mediaType === 'video' && <video src={msg.mediaUrl} controls className="max-w-full max-h-64 object-cover" />}
+                {msg.mediaType === 'audio' && <audio src={msg.mediaUrl} controls className="w-64 max-w-full h-10 mt-1" />}
                 {msg.mediaType === 'sticker' && <img src={msg.mediaUrl} alt="sticker" className="w-32 h-32 object-contain" loading="lazy" />}
               </div>
             )}
@@ -716,7 +1012,6 @@ function AuthScreen({ db, onComplete }) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Thêm state khóa thiết bị cho AuthScreen
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [lockoutTime, setLockoutTime] = useState(0);
   const [timeLeft, setTimeLeft] = useState(0);
@@ -782,13 +1077,12 @@ function AuthScreen({ db, onComplete }) {
           await logActivity('RESET_PIN', trimmed);
           onComplete({ username: trimmed, pin: hashedInputPin, createdAt: existingData.createdAt, lastLoginAt: now });
         } else {
-          // Xử lý báo lỗi và đếm sai
           if (hashedInputPin !== savedPin) { 
             setFailedAttempts(prev => {
               const newAttempts = prev + 1;
               if (newAttempts >= 5) {
                 setError('Khóa tạm thời do nhập sai quá nhiều!');
-                setLockoutTime(Date.now() + 60000); // Khóa 60s
+                setLockoutTime(Date.now() + 60000); 
                 playAlarmSound();
                 logActivity('BRUTE_FORCE_WARNING', trimmed, { attempts: newAttempts });
               } else {
@@ -801,7 +1095,6 @@ function AuthScreen({ db, onComplete }) {
             return; 
           }
           
-          // Đăng nhập thành công
           setFailedAttempts(0);
           await updateDoc(getUserProfileDoc(trimmed), { lastLoginAt: now });
           const dirRef = isCustomConfigValid ? collection(db, 'user_directory') : collection(db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'secure-chat', 'public', 'data', 'user_directory');
@@ -947,7 +1240,7 @@ function LockScreen({ profile, onUnlock, onReset }) {
             const newAttempts = prev + 1;
             if (newAttempts === 5) {
               setError('Khóa tạm thời do nhập sai quá nhiều!');
-              setLockoutTime(Date.now() + 60000); // Khóa 60 giây
+              setLockoutTime(Date.now() + 60000); 
               playAlarmSound();
               logActivity('BRUTE_FORCE_WARNING', profile.username, { attempts: newAttempts });
             } else if (newAttempts < 5) {
@@ -1017,7 +1310,6 @@ function LockScreen({ profile, onUnlock, onReset }) {
           </>
         )}
         
-        {/* Ẩn nút đăng nhập lại khi đang bị khóa */}
         {lockoutTime === 0 && (
           <button onClick={onReset} className="mt-10 text-sm font-bold text-blue-500 hover:text-blue-600 underline transition-colors">
             Đăng nhập lại / Quên mã PIN?
@@ -1096,7 +1388,7 @@ function UserAutocomplete({ availableUsers, selectedUsers, onAdd, onRemove }) {
   );
 }
 
-function RoomMembersModal({ room, allUsers, onClose, onAddMember }) {
+function RoomMembersModal({ room, profile, allUsers, onClose, onAddMember, onSoftDelete }) {
   const [selected, setSelected] = useState([]);
   
   const handleAdd = () => {
@@ -1105,13 +1397,13 @@ function RoomMembersModal({ room, allUsers, onClose, onAddMember }) {
   };
 
   return (
-    <div className="fixed inset-0 bg-white/60 backdrop-blur-sm z-50 flex flex-col items-center justify-center p-4">
-      <div className="relative w-full max-w-md bg-white border-2 border-pink-200 rounded-[32px] shadow-2xl shadow-pink-200/50 overflow-visible">
+    <div className="fixed inset-0 bg-white/60 backdrop-blur-sm z-[55] flex flex-col items-center justify-center p-4">
+      <div className="relative w-full max-w-md bg-white border-2 border-pink-200 rounded-[32px] shadow-2xl shadow-pink-200/50 overflow-visible flex flex-col max-h-[85vh]">
         <div className="flex justify-between items-center p-6 border-b-2 border-pink-200 bg-pink-50/30 rounded-t-[32px]">
           <h3 className="text-gray-800 font-black flex items-center gap-2 text-xl"><Users className="w-6 h-6 text-pink-400" /> Quản lý thành viên</h3>
           <button onClick={onClose} className="text-gray-400 hover:text-pink-500 bg-white border border-pink-200 rounded-full p-2 shadow-sm transition-colors"><X className="w-5 h-5" /></button>
         </div>
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-6 overflow-y-auto">
           <div className="bg-pink-50/50 p-4 rounded-2xl border-2 border-pink-100">
             <h4 className="text-gray-700 text-sm font-bold flex items-center gap-2 mb-1"><Clock className="w-4 h-4 text-pink-400" /> Log Tổ Chat</h4>
             <p className="text-xs text-gray-500 font-medium ml-6">Tạo lúc: {room.createdAt ? new Date(room.createdAt).toLocaleString('vi-VN') : 'Chưa rõ'}</p>
@@ -1140,6 +1432,113 @@ function RoomMembersModal({ room, allUsers, onClose, onAddMember }) {
               </button>
             )}
           </div>
+          
+          {room.createdBy === profile.username && (
+            <div className="border-t-2 border-pink-100 pt-5 mt-5">
+              <button onClick={() => onSoftDelete(room)} className="w-full bg-red-50 text-red-500 hover:bg-red-100 hover:text-red-600 font-bold py-3 px-4 rounded-xl shadow-sm border border-red-200 transition-all flex items-center justify-center gap-2">
+                <Trash2 className="w-4 h-4" /> Xóa Tổ Chat Này
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ profile, archivedRooms, onClose, onRestore, onHardDelete }) {
+  return (
+    <div className="fixed inset-0 bg-white/60 backdrop-blur-sm z-[55] flex flex-col items-center justify-center p-4">
+      <div className="relative w-full max-w-md bg-white border-2 border-pink-200 rounded-[32px] shadow-2xl shadow-pink-200/50 overflow-hidden flex flex-col max-h-[85vh]">
+        <div className="flex justify-between items-center p-6 border-b-2 border-pink-200 bg-pink-50/30 rounded-t-[32px]">
+          <h3 className="text-gray-800 font-black flex items-center gap-2 text-xl"><Settings className="w-6 h-6 text-pink-400" /> Cài đặt Tài khoản</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-pink-500 bg-white border border-pink-200 rounded-full p-2 shadow-sm transition-colors"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-6 overflow-y-auto flex-1 space-y-6">
+          <div>
+            <h4 className="font-bold text-gray-700 mb-2">Thông tin của bạn</h4>
+            <div className="bg-pink-50/50 p-4 rounded-2xl border-2 border-pink-100 flex items-center gap-4">
+              <div className="w-14 h-14 bg-pink-200 rounded-full flex items-center justify-center text-pink-600 font-black text-2xl border-2 border-white shadow-sm">
+                {profile.username[0].toUpperCase()}
+              </div>
+              <div>
+                <p className="font-black text-gray-800 text-lg">{profile.username}</p>
+                <p className="text-xs text-gray-500 font-medium">Tham gia: {profile.createdAt ? new Date(profile.createdAt).toLocaleDateString('vi-VN') : 'Không rõ'}</p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <h4 className="font-bold text-gray-700 mb-3 flex items-center gap-2"><Trash2 className="w-4 h-4 text-red-400" /> Thùng rác Tổ Chat ({archivedRooms.length})</h4>
+            {archivedRooms.length === 0 ? (
+              <p className="text-sm text-gray-500 font-medium italic">Thùng rác đang trống trơn.</p>
+            ) : (
+              <div className="space-y-3">
+                {archivedRooms.map(room => (
+                  <div key={room.id} className="bg-white border-2 border-pink-100 p-4 rounded-2xl shadow-sm flex flex-col gap-3 hover:border-pink-200 transition-colors">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-gray-800 truncate pr-2">{room.name}</span>
+                      <span className="text-[10px] text-gray-400 shrink-0 font-medium">{new Date(room.createdAt).toLocaleDateString('vi-VN')}</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => onRestore(room)} className="flex-1 bg-blue-50 text-blue-600 hover:bg-blue-100 font-bold text-xs py-2 rounded-xl flex items-center justify-center gap-1 transition-colors border border-blue-100"><RefreshCw className="w-3 h-3" /> Khôi phục</button>
+                      <button onClick={() => onHardDelete(room)} className="flex-1 bg-red-50 text-red-600 hover:bg-red-100 font-bold text-xs py-2 rounded-xl flex items-center justify-center gap-1 transition-colors border border-red-100"><Trash2 className="w-3 h-3" /> Xóa vĩnh viễn</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MediaGalleryModal({ messages, onClose }) {
+  const mediaMessages = messages.filter(m => m.mediaUrl && ['image', 'video', 'audio'].includes(m.mediaType)).reverse();
+
+  return (
+    <div className="fixed inset-0 bg-white/60 backdrop-blur-sm z-[80] flex flex-col items-center justify-center p-4">
+      <div className="relative w-full max-w-2xl bg-white border-2 border-pink-200 rounded-[32px] shadow-2xl shadow-pink-200/50 overflow-hidden flex flex-col max-h-[85vh]">
+        <div className="flex justify-between items-center p-6 border-b-2 border-pink-200 bg-pink-50/30 rounded-t-[32px]">
+          <h3 className="text-gray-800 font-black flex items-center gap-2 text-xl"><Images className="w-6 h-6 text-pink-400" /> Kho Media</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-pink-500 bg-white border border-pink-200 rounded-full p-2 shadow-sm transition-colors"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-6 overflow-y-auto flex-1">
+          {mediaMessages.length === 0 ? (
+            <div className="text-center text-gray-400 py-10 font-medium">Chưa có ảnh, video hay tin nhắn thoại nào trong Tổ này 😶‍🌫️</div>
+          ) : (
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+              {mediaMessages.map(msg => (
+                <div key={msg.id} className="aspect-square rounded-2xl overflow-hidden border-2 border-pink-100 relative group bg-gray-50 shadow-sm hover:shadow-md transition-all hover:border-pink-300">
+                  {msg.mediaType === 'image' && (
+                    <>
+                      <img src={msg.mediaUrl} alt="media" className="w-full h-full object-cover" />
+                      <a href={msg.mediaUrl} download={`image-${msg.timestamp}.jpg`} className="absolute top-1.5 right-1.5 p-1.5 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/70 z-10" title="Tải xuống">
+                        <Download className="w-3.5 h-3.5" />
+                      </a>
+                    </>
+                  )}
+                  {msg.mediaType === 'video' && (
+                    <>
+                      <video src={msg.mediaUrl} className="w-full h-full object-cover" />
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/20"><Film className="text-white w-8 h-8 opacity-80" /></div>
+                    </>
+                  )}
+                  {msg.mediaType === 'audio' && (
+                    <div className="w-full h-full flex flex-col items-center justify-center bg-pink-100/50 text-pink-400">
+                      <Mic className="w-8 h-8 mb-2" />
+                      <span className="text-[10px] font-bold">Thoại</span>
+                    </div>
+                  )}
+                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2 pt-6 text-[10px] text-white font-bold opacity-0 group-hover:opacity-100 transition-opacity truncate">
+                    {msg.senderName}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
